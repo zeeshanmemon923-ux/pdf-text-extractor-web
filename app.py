@@ -1,7 +1,7 @@
 import re
 
+import pdfplumber
 import streamlit as st
-from pypdf import PdfReader
 
 st.set_page_config(page_title="PDF Text Extractor", page_icon="📄", layout="centered")
 
@@ -26,28 +26,75 @@ def fix_letter_spacing(text: str) -> str:
     return "\n".join(fixed_lines)
 
 
+def format_table(table: list) -> str:
+    """Format a table (list of rows, each a list of cells) as aligned pipe-separated text."""
+    cleaned = [[(cell or "").strip() for cell in row] for row in table]
+    if not cleaned:
+        return ""
+    col_count = max(len(row) for row in cleaned)
+    col_widths = [0] * col_count
+    for row in cleaned:
+        for i in range(col_count):
+            val = row[i] if i < len(row) else ""
+            col_widths[i] = max(col_widths[i], len(val))
+
+    lines = []
+    for r, row in enumerate(cleaned):
+        padded = [
+            (row[i] if i < len(row) else "").ljust(col_widths[i])
+            for i in range(col_count)
+        ]
+        lines.append("| " + " | ".join(padded) + " |")
+        if r == 0:
+            lines.append("|-" + "-|-".join("-" * w for w in col_widths) + "-|")
+    return "\n".join(lines)
+
+
 def extract_text_from_upload(uploaded_file) -> str:
-    reader = PdfReader(uploaded_file)
+    pages_output = []
 
-    if reader.is_encrypted:
-        try:
-            reader.decrypt("")
-        except Exception:
-            raise ValueError("PDF is encrypted/password-protected and could not be opened.")
+    with pdfplumber.open(uploaded_file) as pdf:
+        total_pages = len(pdf.pages)
 
-    pages_text = []
-    total_pages = len(reader.pages)
+        for i, page in enumerate(pdf.pages, start=1):
+            section = [f"\n{'=' * 60}\nPage {i} of {total_pages}\n{'=' * 60}"]
 
-    for i, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        text = fix_letter_spacing(text.strip())
-        pages_text.append(f"\n{'=' * 60}\nPage {i} of {total_pages}\n{'=' * 60}\n{text}")
+            tables = page.find_tables()
 
-    return "\n".join(pages_text)
+            if tables:
+                # Extract each detected table separately, formatted as rows/columns
+                for t_idx, table_obj in enumerate(tables, start=1):
+                    table_data = table_obj.extract()
+                    if table_data:
+                        section.append(f"\n[Table {t_idx}]")
+                        section.append(format_table(table_data))
+
+                # Also grab any text on the page that isn't part of a table
+                # (e.g. headers, notes above/below the table)
+                table_bboxes = [t.bbox for t in tables]
+                non_table_text = page.filter(
+                    lambda obj: not any(
+                        obj.get("top", -1) >= bbox[1] and obj.get("bottom", -1) <= bbox[3]
+                        and obj.get("x0", -1) >= bbox[0] and obj.get("x1", -1) <= bbox[2]
+                        for bbox in table_bboxes
+                    )
+                ).extract_text() or ""
+                non_table_text = fix_letter_spacing(non_table_text.strip())
+                if non_table_text:
+                    section.append("\n[Other text on page]")
+                    section.append(non_table_text)
+            else:
+                text = page.extract_text() or ""
+                text = fix_letter_spacing(text.strip())
+                section.append(text)
+
+            pages_output.append("\n".join(section))
+
+    return "\n".join(pages_output)
 
 
 st.title("📄 PDF Text Extractor")
-st.caption("Upload a PDF and get its extracted text — instantly, no signup.")
+st.caption("Upload a PDF and get its extracted text — tables come out as rows and columns, regular text stays plain.")
 
 uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"])
 
@@ -77,4 +124,4 @@ else:
     st.info("Upload a PDF above to get started.")
 
 st.divider()
-st.caption("Built with pypdf + Streamlit · by Muhammad Zeeshan")
+st.caption("Built with pdfplumber + Streamlit · by Muhammad Zeeshan")
